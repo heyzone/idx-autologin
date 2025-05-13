@@ -4,14 +4,12 @@ on:
   push:
     branches: [ main ]
   schedule:
-    # 每 30 分钟运行，CST 时间 21:00–次日 12:30（CDT 8:00–23:30）
     - cron: '*/30 21-23,0-12 * * *'
   workflow_dispatch:
 
 jobs:
   keepalive:
-    runs-on: ubuntu-22.04  # 固定版本以确保兼容性
-
+    runs-on: ubuntu-22.04
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -23,15 +21,10 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update || { echo "apt-get update failed"; exit 1; }
-          sudo apt-get install -y \
-            curl wget gnupg \
-            libgtk-3-0 libgbm1 libasound2 libxss1 \
-            libatk1.0-0 libatk-bridge2.0-0 libxtst6 libdrm2 \
-            libxcomposite1 libxdamage1 libxfixes3 libxrandr2 \
-            libcups2 libxkbcommon0 libpango-1.0-0 libcairo2 \
-            libegl1 libglib2.0-0 libnspr4 libnss3 xvfb \
-            || { echo "apt-get install failed"; exit 1; }
+          sudo apt-get update
+          sudo apt-get install -y curl wget gnupg libgtk-3-0 libgbm1 libasound2 libxss1 libatk1.0-0 \
+            libatk-bridge2.0-0 libxtst6 libdrm2 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 \
+            libcups2 libxkbcommon0 libpango-1.0-0 libcairo2 libegl1 libglib2.0-0 libnspr4 libnss3 xvfb
 
       - name: Install Python dependencies
         run: |
@@ -51,8 +44,25 @@ jobs:
         env:
           WEB_URL: ${{ secrets.WEB_URL }}
         run: |
+          # 验证 WEB_URL 是否为空
+          if [ -z "$WEB_URL" ]; then
+            echo "Error: WEB_URL is empty or not set"
+            echo "NEEDS_RECOVERY=true" >> $GITHUB_ENV
+            exit 1
+          fi
+
+          # 清理 WEB_URL
+          CLEANED_URL=$(echo "$WEB_URL" | tr -d '[:space:]\n')
+          echo "Cleaned WEB_URL: $(echo "$CLEANED_URL" | sed 's|https\?://[^/]*|***|')"
+
+          # 确保 WEB_URL 以 http:// 或 https:// 开头
+          if [[ ! "$CLEANED_URL" =~ ^https?:// ]]; then
+            CLEANED_URL="https://$CLEANED_URL"
+            echo "Added protocol to WEB_URL: $(echo "$CLEANED_URL" | sed 's|https\?://[^/]*|***|')"
+          fi
+
           # 使用 curl 检查 HTTP 状态码
-          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -L "$WEB_URL")
+          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -L "$CLEANED_URL")
           echo "WEB_URL status code: $HTTP_STATUS"
           echo "HTTP_STATUS=$HTTP_STATUS" >> $GITHUB_ENV
 
@@ -66,32 +76,85 @@ jobs:
           cat << 'EOF' > check_redirect.py
           from playwright.sync_api import sync_playwright
           import sys
+          import re
+          import os
+          import json
+          import time
           def main():
               web_url = sys.argv[1]
-              with sync_playwright() as p:
-                  browser = p.firefox.launch(headless=True)
-                  page = browser.new_page()
-                  response = page.goto(web_url, wait_until="networkidle")
-                  final_url = page.url
-                  browser.close()
-                  # 检查最终 URL 是否与初始 URL 一致
-                  if final_url != web_url:
-                      print(f"Redirection detected: {web_url} -> {final_url}")
-                      sys.exit(1)  # 跳转，标记需要恢复
-                  else:
-                      print("No redirection detected")
-                      sys.exit(0)  # 无跳转
+              # 验证 URL 格式
+              if not re.match(r'^https?://[^\s/$.?#].[^\s]*$', web_url):
+                  print(f"Invalid URL format: {web_url}")
+                  sys.exit(1)
+              try:
+                  with sync_playwright() as p:
+                      browser = p.firefox.launch(headless=True)
+                      context = browser.new_context()
+                      # 加载 Cookies
+                      cookies_path = "google_cookies.json"
+                      if os.path.exists(cookies_path):
+                          try:
+                              with open(cookies_path, "r") as f:
+                                  cookies = json.load(f)
+                              valid_cookies = [
+                                  c for c in cookies
+                                  if not c.get("expires") or c["expires"] == -1 or c["expires"] > time.time()
+                              ]
+                              context.add_cookies(valid_cookies)
+                              print("✓ Cookies loaded from google_cookies.json")
+                          except Exception as e:
+                              print(f"Failed to load cookies: {e}")
+                      page = context.new_page()
+                      response = page.goto(web_url, wait_until="networkidle", timeout=30000)
+                      final_url = page.url
+                      # 保存截图
+                      page.screenshot(path="redirect_screenshot.png")
+                      # 记录最终 URL（掩码敏感部分）
+                      masked_final_url = re.sub(r'https?://[^/]+', '***', final_url)
+                      print(f"Final URL: {masked_final_url}")
+                      # 检查是否跳转
+                      if final_url != web_url:
+                          if final_url.startswith("https://accounts.google.com"):
+                              print("Google login redirect detected, checking login status...")
+                              # 检查是否需要交互（邮箱/密码输入框或 CAPTCHA）
+                              login_required = (
+                                  page.locator("input[type='email'], input[aria-label='Email or phone']").is_visible() or
+                                  page.locator("input[type='password'], input[aria-label='Enter your password']").is_visible() or
+                                  page.locator("img[src*='captcha'], div[id*='captcha'], div:has-text('CAPTCHA')").is_visible()
+                              )
+                              if not login_required and "signin" not in final_url:
+                                  print("✓ Logged in successfully via cookies")
+                                  sys.exit(0)  # 已登录，无需恢复
+                              else:
+                                  print("Login required (email, password, or CAPTCHA detected)")
+                                  sys.exit(1)  # 需要登录，触发恢复
+                          else:
+                              print(f"Unexpected redirection: {web_url} -> {final_url}")
+                              sys.exit(1)  # 非 Google 跳转，触发恢复
+                      else:
+                          print("No redirection detected")
+                          sys.exit(0)  # 无跳转
+              except Exception as e:
+                  print(f"Playwright error: {str(e)}")
+                  sys.exit(1)  # 任何错误触发恢复
           if __name__ == "__main__":
               main()
           EOF
 
           # 运行 Playwright 脚本
-          python check_redirect.py "$WEB_URL"
+          python check_redirect.py "$CLEANED_URL"
           if [ $? -eq 1 ]; then
             echo "NEEDS_RECOVERY=true" >> $GITHUB_ENV
           else
             echo "NEEDS_RECOVERY=false" >> $GITHUB_ENV
           fi
+
+      - name: Upload redirect screenshot
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: redirect-screenshot
+          path: redirect_screenshot.png
 
       - name: Run recovery if status is not 200 or redirected
         if: env.HTTP_STATUS != '200' || env.NEEDS_RECOVERY == 'true'
@@ -100,7 +163,6 @@ jobs:
           GOOGLE_PW: ${{ secrets.GOOGLE_PW }}
           APP_URL: ${{ secrets.APP_URL }}
         run: |
-          # 下载 google_cookies.json
           curl -s -L "$COOK_URL" -o google_cookies.json
           if [ -f google_cookies.json ]; then
             echo "Successfully downloaded google_cookies.json"
@@ -108,23 +170,25 @@ jobs:
             echo "Error: Failed to download google_cookies.json"
             exit 1
           fi
-          
-          # 运行 main.py
-          python main.py
+          echo "Running main.py..."
+          python main.py > main.log 2>&1 || { echo "main.py failed"; cat main.log; exit 1; }
+          echo "main.py completed"
+          cat main.log
 
-      - name: Skip recovery if URL is accessible and not redirected
-        if: env.HTTP_STATUS == '200' && env.NEEDS_RECOVERY == 'false'
-        run: echo "URL is accessible and not redirected, no need to run recovery script"
-
-      - name: Cache dependencies
-        uses: actions/cache@v4
+      - name: Upload debug artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
+          name: debug-artifacts
           path: |
-            ~/.cache/pip/
-            ~/.cache/ms-playwright/
-            google_cookies.json
-          key: ${{ github.ref_name }}-cache
-          restore-keys: ${{ github.ref_name }}-cache-
+            screenshot.png
+            redirect_screenshot.png
+            captcha_screenshot.png
+            email_failed_screenshot.png
+            password_failed_screenshot.png
+            login_failed_screenshot.png
+            operation_failed_screenshot.png
+            main.log
 
       - name: Commit google_cookies.json
         if: env.HTTP_STATUS != '200' || env.NEEDS_RECOVERY == 'true'
