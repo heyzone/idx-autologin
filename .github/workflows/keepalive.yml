@@ -5,7 +5,7 @@ on:
     branches: [ main ]
   schedule:
     # 每 5 分钟运行，模拟上午 8-12 点和晚上 18-23 点
-    #- cron: '*/5 8-12,18-23 * * *'
+    - cron: '*/30 21-23,0-12 * * *'
   workflow_dispatch:  # 支持手动触发
 
 jobs:
