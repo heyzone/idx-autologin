@@ -183,4 +183,22 @@ def run(playwright: Playwright) -> None:
 
     except Exception as e:
         print(f"错误: {e}")
-        print(f"错误详情: {
+        print(f"错误详情: {traceback.format_exc()}")
+        raise  # 抛出异常，让 GitHub Actions 标记失败
+    finally:
+        if page:
+            page.close()
+        if context:
+            context.close()
+        if browser:
+            browser.close()
+        print("脚本执行完毕")
+
+if __name__ == "__main__":
+    try:
+        with sync_playwright() as playwright:
+            run(playwright)
+    except Exception as e:
+        print(f"Playwright 启动失败: {e}")
+        print(f"错误详情: {traceback.format_exc()}")
+        exit(1)  # 明确退出码，确保 GitHub Actions 检测失败
