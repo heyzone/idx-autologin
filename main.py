@@ -1,83 +1,78 @@
-import re
 import os
 import json
 import time
 import traceback
 from pathlib import Path
-from playwright.sync_api import Playwright, sync_playwright, TimeoutError
+from playwright.sync_api import Playwright, sync_playwright
 
-def wait_for_element_with_retry(page, selector, description, timeout_seconds=10, max_attempts=3):
-    """尝试等待元素出现，成功返回 True，失败返回 False"""
-    for attempt in range(max_attempts):
+def wait_for_element(page, selector, description, timeout=20000, retries=3):
+    """等待元素出现，成功返回 True，失败返回 False"""
+    for i in range(retries):
         try:
-            print(f"等待 {description}，第 {attempt + 1}/{max_attempts} 次尝试...")
-            page.locator(selector).wait_for(state="visible", timeout=timeout_seconds * 1000)
+            print(f"等待 {description}，第 {i+1}/{retries} 次...")
+            page.locator(selector).wait_for(state="visible", timeout=timeout)
             print(f"✓ {description} 已找到")
             return True
         except Exception as e:
-            print(f"✗ 等待 {description} 超时: {e}")
-            if attempt < max_attempts - 1:
-                print("准备重试...")
+            print(f"✗ 等待 {description} 失败: {e}")
             time.sleep(1)
-    print(f"✗ 达到最大尝试次数 ({max_attempts})，无法找到 {description}")
+    print(f"✗ 无法找到 {description}")
     return False
 
-def refresh_page_and_wait(page, url, refresh_attempts=5, total_wait_time=120):
-    """刷新页面并等待 Web 按钮和 Starting server 文本"""
+def refresh_page_and_wait(page, url, max_attempts=5, total_wait=120):
+    """刷新页面并等待 Web 按钮和 Starting server"""
     start_time = time.time()
-    refresh_count = 0
-    web_button_found = False
-    starting_server_found = False
+    web_found = False
+    server_found = False
 
-    while time.time() - start_time < total_wait_time and refresh_count < refresh_attempts:
-        if not (web_button_found and starting_server_found):
-            print(f"刷新页面，第 {refresh_count + 1}/{refresh_attempts} 次尝试...")
-            try:
-                page.goto(url, wait_until="networkidle", timeout=60000)
-            except Exception as e:
-                print(f"页面加载失败: {e}")
-            
-            refresh_count += 1
+    for attempt in range(max_attempts):
+        if time.time() - start_time > total_wait:
+            print("超时，停止尝试")
+            break
+        print(f"刷新页面，第 {attempt+1}/{max_attempts} 次...")
+        try:
+            page.goto(url, wait_until="networkidle", timeout=60000)
+        except Exception as e:
+            print(f"页面加载失败: {e}")
 
         # 查找 Web 按钮
-        if not web_button_found:
-            web_button_selector = "button:has-text('Web')"  # 简化选择器
-            if wait_for_element_with_retry(page, web_button_selector, "Web 按钮", timeout_seconds=10):
+        if not web_found:
+            web_selector = "button:has-text('Web'), a:has-text('Web')"
+            if wait_for_element(page, web_selector, "Web 按钮", timeout=15000):
                 try:
-                    page.locator(web_button_selector).click()
+                    page.locator(web_selector).click()
                     print("✓ Web 按钮已点击")
-                    web_button_found = True
+                    web_found = True
                     time.sleep(5)  # 等待响应
                 except Exception as e:
                     print(f"点击 Web 按钮失败: {e}")
 
-        # 查找 Starting server 文本
-        if web_button_found and not starting_server_found:
-            starting_server_selector = "h1, h2, h3, div:has-text('Starting server')"
-            if wait_for_element_with_retry(page, starting_server_selector, "Starting server 文本", timeout_seconds=20):
-                starting_server_found = True
-                print("✓ Starting server 文本已找到")
+        # 查找 Starting server
+        if web_found and not server_found:
+            server_selector = "h1, h2, h3, div:has-text('Starting server')"
+            if wait_for_element(page, server_selector, "Starting server", timeout=30000):
+                server_found = True
+                print("✓ Starting server 已找到")
 
-        if web_button_found and starting_server_found:
-            print("✓ Web 按钮和 Starting server 文本都已找到")
+        if web_found and server_found:
+            print("✓ Web 按钮和 Starting server 已找到")
             break
-
         time.sleep(5)
-        elapsed_time = time.time() - start_time
-        print(f"已等待 {int(elapsed_time)} 秒，剩余 {int(total_wait_time - elapsed_time)} 秒")
 
-    return web_button_found and starting_server_found
+    return web_found and server_found
 
-def run(playwright: Playwright) -> None:
+def run(playwright: Playwright):
+    # 获取环境变量
     google_pw = os.getenv("GOOGLE_PW", "")
     credentials = google_pw.split(" ", 1) if google_pw else []
-    email = credentials[0] if len(credentials) > 0 else None
+    email = credentials[0] if credentials else None
     password = credentials[1] if len(credentials) > 1 else None
     app_url = os.getenv("APP_URL", "https://idx.google.com/app-43646734")
     cookies_path = Path("google_cookies.json")
 
+    # 验证凭据
     if not email or not password:
-        print("错误: 缺少 GOOGLE_PW 环境变量（格式: '邮箱 密码'）")
+        print("错误: GOOGLE_PW 格式应为 '邮箱 密码'")
         raise ValueError("GOOGLE_PW 缺失或格式错误")
 
     browser = None
@@ -93,27 +88,28 @@ def run(playwright: Playwright) -> None:
         cookies_loaded = False
         if cookies_path.exists():
             try:
-                print("加载 google_cookies.json...")
                 with open(cookies_path, "r") as f:
                     cookies = json.load(f)
-                # 验证 Cookies 有效性（检查过期时间）
-                current_time = time.time()
+                # 过滤有效 Cookies
                 valid_cookies = [
                     c for c in cookies
-                    if not c.get("expires") or c["expires"] == -1 or c["expires"] > current_time
+                    if not c.get("expires") or c["expires"] == -1 or c["expires"] > time.time()
                 ]
                 if valid_cookies:
                     context.add_cookies(valid_cookies)
                     cookies_loaded = True
                     print("✓ Cookies 加载成功")
                 else:
-                    print("Cookies 已过期或无效，将尝试密码登录")
+                    print("Cookies 已过期或无效")
             except Exception as e:
                 print(f"加载 Cookies 失败: {e}")
 
         # 访问 APP_URL
         print(f"导航到 {app_url}")
-        page.goto(app_url, wait_until="networkidle", timeout=60000)
+        try:
+            page.goto(app_url, wait_until="networkidle", timeout=60000)
+        except Exception as e:
+            print(f"页面加载失败: {e}")
         current_url = page.url
         print(f"当前 URL: {current_url}")
 
@@ -124,40 +120,48 @@ def run(playwright: Playwright) -> None:
         else:
             print("需要密码登录...")
 
-        # 登录流程
-        if login_required:
             # 检测 CAPTCHA
             captcha_selector = "img[src*='captcha'], div[id*='captcha'], div:has-text('CAPTCHA')"
-            if wait_for_element_with_retry(page, captcha_selector, "CAPTCHA", timeout_seconds=5):
-                print("⚠ 检测到 CAPTCHA，可能阻止自动化登录")
-                raise RuntimeError("CAPTCHA 检测到，需手动验证")
+            if wait_for_element(page, captcha_selector, "CAPTCHA", timeout=5000):
+                print("⚠ 检测到 CAPTCHA")
+                page.screenshot(path="captcha_screenshot.png")
+                raise RuntimeError("CAPTCHA 阻止登录")
 
             # 输入邮箱
             email_selector = "input[type='email'], input[aria-label='Email or phone']"
-            if wait_for_element_with_retry(page, email_selector, "邮箱输入框", timeout_seconds=20):
+            if wait_for_element(page, email_selector, "邮箱输入框", timeout=30000):
                 page.locator(email_selector).fill(email)
                 print("✓ 邮箱已输入")
-                next_button_selector = "button:has-text('Next'), button[jsname='LgbsSe']"
-                if wait_for_element_with_retry(page, next_button_selector, "下一步按钮", timeout_seconds=10):
-                    page.locator(next_button_selector).click()
+                next_selector = "button:has-text('Next'), button[aria-label*='Next']"
+                if wait_for_element(page, next_selector, "下一步按钮", timeout=15000):
+                    page.locator(next_selector).click()
                     print("✓ 点击下一步")
+                else:
+                    raise RuntimeError("未找到下一步按钮")
 
             # 输入密码
             password_selector = "input[type='password'], input[aria-label='Enter your password']"
-            if wait_for_element_with_retry(page, password_selector, "密码输入框", timeout_seconds=20):
+            if wait_for_element(page, password_selector, "密码输入框", timeout=30000):
                 page.locator(password_selector).fill(password)
                 print("✓ 密码已输入")
-                if wait_for_element_with_retry(page, next_button_selector, "下一步按钮", timeout_seconds=10):
-                    page.locator(next_button_selector).click()
+                if wait_for_element(page, next_selector, "下一步按钮", timeout=15000):
+                    page.locator(next_selector).click()
                     print("✓ 提交密码")
                     time.sleep(5)  # 等待登录完成
+                else:
+                    raise RuntimeError("未找到密码页面的下一步按钮")
+            else:
+                raise RuntimeError("未找到密码输入框")
 
             # 验证登录
-            page.goto(app_url, wait_until="networkidle", timeout=60000)
+            try:
+                page.goto(app_url, wait_until="networkidle", timeout=60000)
+            except Exception as e:
+                print(f"重定向到 {app_url} 失败: {e}")
             current_url = page.url
             print(f"登录后 URL: {current_url}")
             if "idx.google.com" in current_url and "signin" not in current_url:
-                print("✓ 密码登录成功")
+                print("✓ 登录成功")
                 # 保存 Cookies
                 cookies = context.cookies()
                 with open(cookies_path, "w") as f:
@@ -165,26 +169,31 @@ def run(playwright: Playwright) -> None:
                 print("✓ Cookies 保存成功")
             else:
                 print(f"⚠ 登录失败，当前 URL: {current_url}")
+                page.screenshot(path="login_failed_screenshot.png")
                 raise RuntimeError("登录失败")
 
         # 执行页面操作
-        elements_found = refresh_page_and_wait(page, app_url, refresh_attempts=5, total_wait_time=120)
-        if elements_found:
+        if refresh_page_and_wait(page, app_url, max_attempts=5, total_wait=120):
             print("✓ 成功点击 Web 按钮并找到 Starting server")
             time.sleep(20)  # 等待操作完成
+            # 保存最终 Cookies
+            cookies = context.cookies()
+            with open(cookies_path, "w") as f:
+                json.dump(cookies, f)
+            print("✓ 最终 Cookies 保存成功")
         else:
             print("⚠ 未找到 Web 按钮或 Starting server")
+            page.screenshot(path="operation_failed_screenshot.png")
             raise RuntimeError("页面操作失败")
 
-        # 保存截图用于调试
-        screenshot_path = Path("screenshot.png")
-        page.screenshot(path=screenshot_path)
-        print(f"✓ 截图保存到 {screenshot_path}")
+        # 保存截图
+        page.screenshot(path="screenshot.png")
+        print("✓ 截图保存到 screenshot.png")
 
     except Exception as e:
         print(f"错误: {e}")
         print(f"错误详情: {traceback.format_exc()}")
-        raise  # 抛出异常，让 GitHub Actions 标记失败
+        raise
     finally:
         if page:
             page.close()
@@ -201,4 +210,4 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"Playwright 启动失败: {e}")
         print(f"错误详情: {traceback.format_exc()}")
-        exit(1)  # 明确退出码，确保 GitHub Actions 检测失败
+        exit(1)
