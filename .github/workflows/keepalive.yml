@@ -47,21 +47,60 @@ jobs:
             echo "1.34.0" > playwright.version
           fi
 
-      - name: Check WEB_URL status
+      - name: Check WEB_URL status and redirection
         env:
           WEB_URL: ${{ secrets.WEB_URL }}
         run: |
+          # 使用 curl 检查 HTTP 状态码
           HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -L "$WEB_URL")
           echo "WEB_URL status code: $HTTP_STATUS"
           echo "HTTP_STATUS=$HTTP_STATUS" >> $GITHUB_ENV
 
-      - name: Run recovery if status is not 200
-        if: env.HTTP_STATUS != '200'
+          # 如果状态码不是 200，直接标记需要恢复
+          if [ "$HTTP_STATUS" != "200" ]; then
+            echo "NEEDS_RECOVERY=true" >> $GITHUB_ENV
+            exit 0
+          fi
+
+          # 如果状态码是 200，使用 Playwright 检查是否跳转
+          cat << 'EOF' > check_redirect.py
+          from playwright.sync_api import sync_playwright
+          import sys
+          def main():
+              web_url = sys.argv[1]
+              with sync_playwright() as p:
+                  browser = p.firefox.launch(headless=True)
+                  page = browser.new_page()
+                  response = page.goto(web_url, wait_until="networkidle")
+                  final_url = page.url
+                  browser.close()
+                  # 检查最终 URL 是否与初始 URL 一致
+                  if final_url != web_url:
+                      print(f"Redirection detected: {web_url} -> {final_url}")
+                      sys.exit(1)  # 跳转，标记需要恢复
+                  else:
+                      print("No redirection detected")
+                      sys.exit(0)  # 无跳转
+          if __name__ == "__main__":
+              main()
+          EOF
+
+          # 运行 Playwright 脚本
+          python check_redirect.py "$WEB_URL"
+          if [ $? -eq 1 ]; then
+            echo "NEEDS_RECOVERY=true" >> $GITHUB_ENV
+          else
+            echo "NEEDS_RECOVERY=false" >> $GITHUB_ENV
+          fi
+
+      - name: Run recovery if status is not 200 or redirected
+        if: env.HTTP_STATUS != '200' || env.NEEDS_RECOVERY == 'true'
         env:
           COOK_URL: ${{ secrets.COOK_URL }}
           GOOGLE_PW: ${{ secrets.GOOGLE_PW }}
           APP_URL: ${{ secrets.APP_URL }}
         run: |
+          # 下载 google_cookies.json
           curl -s -L "$COOK_URL" -o google_cookies.json
           if [ -f google_cookies.json ]; then
             echo "Successfully downloaded google_cookies.json"
@@ -69,11 +108,13 @@ jobs:
             echo "Error: Failed to download google_cookies.json"
             exit 1
           fi
+          
+          # 运行 main.py
           python main.py
 
-      - name: Skip recovery if URL is accessible
-        if: env.HTTP_STATUS == '200'
-        run: echo "URL is accessible, no need to run recovery script"
+      - name: Skip recovery if URL is accessible and not redirected
+        if: env.HTTP_STATUS == '200' && env.NEEDS_RECOVERY == 'false'
+        run: echo "URL is accessible and not redirected, no need to run recovery script"
 
       - name: Cache dependencies
         uses: actions/cache@v4
@@ -86,7 +127,7 @@ jobs:
           restore-keys: ${{ github.ref_name }}-cache-
 
       - name: Commit google_cookies.json
-        if: env.HTTP_STATUS != '200'
+        if: env.HTTP_STATUS != '200' || env.NEEDS_RECOVERY == 'true'
         run: |
           git config user.name "GitHub Actions"
           git config user.email "actions@github.com"
