@@ -5,7 +5,7 @@ import traceback
 from pathlib import Path
 from playwright.sync_api import Playwright, sync_playwright
 
-def wait_for_element(page, selector, description, timeout=20000, retries=3):
+def wait_for_element(page, selector, description, timeout=30000, retries=3):
     """等待元素出现，成功返回 True，失败返回 False"""
     for i in range(retries):
         try:
@@ -37,7 +37,7 @@ def refresh_page_and_wait(page, url, max_attempts=5, total_wait=120):
 
         # 查找 Web 按钮
         if not web_found:
-            web_selector = "button:has-text('Web'), a:has-text('Web')"
+            web_selector = "button:has-text('Web'), a:has-text('Web'), div:has-text('Web')"
             if wait_for_element(page, web_selector, "Web 按钮", timeout=15000):
                 try:
                     page.locator(web_selector).click()
@@ -67,7 +67,7 @@ def run(playwright: Playwright):
     credentials = google_pw.split(" ", 1) if google_pw else []
     email = credentials[0] if credentials else None
     password = credentials[1] if len(credentials) > 1 else None
-    app_url = os.getenv("APP_URL", "https://idx.google.com/app-43646734")
+    app_url = os.getenv("APP_URL", "https://idx.google.com/idx2-73475975")
     cookies_path = Path("google_cookies.json")
 
     # 验证凭据
@@ -90,7 +90,6 @@ def run(playwright: Playwright):
             try:
                 with open(cookies_path, "r") as f:
                     cookies = json.load(f)
-                # 过滤有效 Cookies
                 valid_cookies = [
                     c for c in cookies
                     if not c.get("expires") or c["expires"] == -1 or c["expires"] > time.time()
@@ -137,7 +136,11 @@ def run(playwright: Playwright):
                     page.locator(next_selector).click()
                     print("✓ 点击下一步")
                 else:
-                    raise RuntimeError("未找到下一步按钮")
+                    page.screenshot(path="email_failed_screenshot.png")
+                    raise RuntimeError("未找到邮箱页面的下一步按钮")
+            else:
+                page.screenshot(path="email_failed_screenshot.png")
+                raise RuntimeError("未找到邮箱输入框")
 
             # 输入密码
             password_selector = "input[type='password'], input[aria-label='Enter your password']"
@@ -149,8 +152,10 @@ def run(playwright: Playwright):
                     print("✓ 提交密码")
                     time.sleep(5)  # 等待登录完成
                 else:
+                    page.screenshot(path="password_failed_screenshot.png")
                     raise RuntimeError("未找到密码页面的下一步按钮")
             else:
+                page.screenshot(path="password_failed_screenshot.png")
                 raise RuntimeError("未找到密码输入框")
 
             # 验证登录
@@ -173,7 +178,7 @@ def run(playwright: Playwright):
                 raise RuntimeError("登录失败")
 
         # 执行页面操作
-        if refresh_page_and_wait(page, app_url, max_attempts=5, total_wait=120):
+        if refresh_page_and_wait(page, app_url):
             print("✓ 成功点击 Web 按钮并找到 Starting server")
             time.sleep(20)  # 等待操作完成
             # 保存最终 Cookies
